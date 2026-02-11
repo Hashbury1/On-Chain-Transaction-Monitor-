@@ -1,0 +1,66 @@
+groups:
+  - name: blockchain_monitor_alerts
+    interval: 30s
+    rules:
+      - alert: HighNotificationFailureRate
+        expr: rate(notifications_sent_total{status="failed"}[5m]) > 0.05
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "High notification failure rate"
+          description: "Notification failure rate is {{ $value | humanizePercentage }} for {{ $labels.destination }}"
+
+      - alert: HighEventProcessingLag
+        expr: block_lag_seconds > 30
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High event processing lag"
+          description: "Event processing lag is {{ $value }}s behind current block"
+
+      - alert: QueueBacklog
+        expr: queue_depth > 10000
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Message queue backlog"
+          description: "Queue depth is {{ $value }} messages"
+
+      - alert: RPCProviderDown
+        expr: up{job="ingestion-service"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "RPC provider connection lost"
+          description: "Ingestion service cannot connect to RPC provider"
+
+      - alert: ServiceDown
+        expr: up == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Service {{ $labels.job }} is down"
+          description: "Service {{ $labels.job }} has been down for more than 2 minutes"
+
+      - alert: HighMemoryUsage
+        expr: container_memory_usage_bytes / container_spec_memory_limit_bytes > 0.9
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High memory usage on {{ $labels.container }}"
+          description: "Memory usage is {{ $value | humanizePercentage }}"
+
+      - alert: DeadLetterQueueGrowing
+        expr: rate(dlq_messages_total[10m]) > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Dead letter queue receiving messages"
+          description: "DLQ has received {{ $value }} messages in last 10 minutes"
