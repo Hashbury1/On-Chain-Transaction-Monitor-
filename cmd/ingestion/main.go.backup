@@ -1,0 +1,194 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/sirupsen/logrus"
+)
+
+var (
+	logger = logrus.New()
+
+	eventsIngested = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "events_ingested_total",
+			Help: "Total number of events ingested",
+		},
+		[]string{"contract", "event_type"},
+	)
+
+	blockLag = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "block_lag_seconds",
+			Help: "Time between current block and latest processed block",
+		},
+	)
+
+	rpcErrors = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "rpc_errors_total",
+			Help: "Total RPC errors",
+		},
+		[]string{"error_type"},
+	)
+
+	websocketReconnections = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "websocket_reconnections_total",
+			Help: "Total WebSocket reconnections",
+		},
+	)
+)
+
+func init() {
+	prometheus.MustRegister(eventsIngested)
+	prometheus.MustRegister(blockLag)
+	prometheus.MustRegister(rpcErrors)
+	prometheus.MustRegister(websocketReconnections)
+
+	logger.SetFormatter(&logrus.JSONFormatter{})
+	logger.SetOutput(os.Stdout)
+	
+	level, _ := logrus.ParseLevel(getEnv("LOG_LEVEL", "info"))
+	logger.SetLevel(level)
+}
+
+type Config struct {
+	RPCPrimaryURL   string
+	RPCFallbackURL  string
+	ChainID         int64
+	MetricsPort     string
+}
+
+func LoadConfig() *Config {
+	return &Config{
+		RPCPrimaryURL:  getEnv("RPC_PRIMARY_URL", ""),
+		RPCFallbackURL: getEnv("RPC_FALLBACK_URL", ""),
+		ChainID:        getEnvAsInt64("CHAIN_ID", 1),
+		MetricsPort:    getEnv("METRICS_PORT_INGESTION", "8081"),
+	}
+}
+
+func main() {
+	logger.Info("Starting On-Chain Transaction Monitor - Ingestion Service")
+
+	config := LoadConfig()
+	
+	if config.RPCPrimaryURL == "" {
+		logger.Warn("RPC_PRIMARY_URL not set, running in simulation mode")
+	}
+
+	go startMetricsServer(config.MetricsPort)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	logger.Info("Blockchain client initialized (simulation mode)")
+	logger.Infof("Monitoring chain ID: %d", config.ChainID)
+
+	go simulateEventProcessing(ctx)
+
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+
+	<-sigChan
+	logger.Info("Shutting down gracefully...")
+	cancel()
+	time.Sleep(2 * time.Second)
+	logger.Info("Shutdown complete")
+}
+
+func simulateEventProcessing(ctx context.Context) {
+	logger.Info("Starting event simulation (demo mode)")
+	logger.Info("In production, this connects to blockchain via WebSocket")
+	
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+
+	blockNumber := uint64(19000000)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			blockNumber++
+			
+			logger.WithFields(logrus.Fields{
+				"block_number": blockNumber,
+				"timestamp":    time.Now().Unix(),
+			}).Debug("Processing simulated block")
+
+			blockLag.Set(float64(2 + blockNumber%3))
+
+			eventCount := blockNumber % 4
+			for i := uint64(0); i < eventCount; i++ {
+				simulateEvent(blockNumber, i)
+			}
+
+			if blockNumber%50 == 0 {
+				rpcErrors.WithLabelValues("connection_timeout").Inc()
+				logger.Warn("Simulated RPC timeout")
+			}
+		}
+	}
+}
+
+func simulateEvent(blockNumber, logIndex uint64) {
+	contracts := []string{
+		"0xdAC17F958D2ee523a2206206994597C13D831ec7",
+		"0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+		"0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+	}
+	
+	contract := contracts[blockNumber%3]
+	eventID := fmt.Sprintf("1-%d-%d", blockNumber, logIndex)
+	
+	eventsIngested.WithLabelValues(contract, "Transfer").Inc()
+	
+	logger.WithFields(logrus.Fields{
+		"event_id":  eventID,
+		"contract":  contract,
+		"event":     "Transfer",
+		"block":     blockNumber,
+	}).Info("Event ingested (simulated)")
+}
+
+func startMetricsServer(port string) {
+	http.Handle("/metrics", promhttp.Handler())
+	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("OK"))
+	})
+
+	addr := fmt.Sprintf(":%s", port)
+	logger.Infof("Metrics server: http://localhost:%s/metrics", port)
+	
+	if err := http.ListenAndServe(addr, nil); err != nil {
+		logger.Fatalf("Metrics server failed: %v", err)
+	}
+}
+
+func getEnv(key, defaultValue string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return defaultValue
+}
+
+func getEnvAsInt64(key string, defaultValue int64) int64 {
+	if value := os.Getenv(key); value != "" {
+		var result int64
+		fmt.Sscanf(value, "%d", &result)
+		return result
+	}
+	return defaultValue
+}

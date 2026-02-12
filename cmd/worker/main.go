@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -13,13 +14,11 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/sirupsen/logrus"
-	"net/http"
 )
 
 var (
 	logger = logrus.New()
 
-	// Prometheus metrics
 	notificationsSent = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "notifications_sent_total",
@@ -31,7 +30,7 @@ var (
 	notificationLatency = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name:    "notification_latency_seconds",
-			Help:    "Latency from event to notification delivery",
+			Help:    "Notification delivery latency",
 			Buckets: []float64{0.1, 0.5, 1, 2, 5, 10, 30},
 		},
 		[]string{"destination"},
@@ -48,24 +47,8 @@ var (
 	dlqMessages = prometheus.NewCounter(
 		prometheus.CounterOpts{
 			Name: "dlq_messages_total",
-			Help: "Total messages sent to dead letter queue",
+			Help: "Messages sent to dead letter queue",
 		},
-	)
-
-	workerProcessingDuration = prometheus.NewHistogram(
-		prometheus.HistogramOpts{
-			Name:    "worker_processing_duration_seconds",
-			Help:    "Time spent processing messages",
-			Buckets: prometheus.DefBuckets,
-		},
-	)
-
-	circuitBreakerState = prometheus.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Name: "circuit_breaker_state",
-			Help: "Circuit breaker state (0=closed, 1=open, 2=half-open)",
-		},
-		[]string{"destination"},
 	)
 )
 
@@ -74,8 +57,6 @@ func init() {
 	prometheus.MustRegister(notificationLatency)
 	prometheus.MustRegister(retryAttempts)
 	prometheus.MustRegister(dlqMessages)
-	prometheus.MustRegister(workerProcessingDuration)
-	prometheus.MustRegister(circuitBreakerState)
 
 	logger.SetFormatter(&logrus.JSONFormatter{})
 	logger.SetOutput(os.Stdout)
@@ -85,8 +66,6 @@ func init() {
 }
 
 type Config struct {
-	QueueURL               string
-	QueueType              string
 	MetricsPort            string
 	MaxRetryAttempts       int
 	RetryBackoffMultiplier int
@@ -96,8 +75,6 @@ type Config struct {
 
 func LoadConfig() *Config {
 	return &Config{
-		QueueURL:               getEnv("RABBITMQ_URL", ""),
-		QueueType:              getEnv("MESSAGE_QUEUE_TYPE", "rabbitmq"),
 		MetricsPort:            getEnv("METRICS_PORT_WORKER", "8082"),
 		MaxRetryAttempts:       getEnvAsInt("MAX_RETRY_ATTEMPTS", 5),
 		RetryBackoffMultiplier: getEnvAsInt("RETRY_BACKOFF_MULTIPLIER", 2),
@@ -107,32 +84,24 @@ func LoadConfig() *Config {
 }
 
 func main() {
-	logger.Info("Starting Notification Worker Service")
+	logger.Info("Starting On-Chain Transaction Monitor - Worker Service")
 
 	config := LoadConfig()
-
-	// Start metrics server
 	go startMetricsServer(config.MetricsPort)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Start worker pool (simulation mode)
 	for i := 0; i < config.WorkerCount; i++ {
 		workerID := i
-		go func() {
-			simulateWorker(ctx, workerID, config)
-		}()
+		go simulateWorker(ctx, workerID, config)
 	}
 
 	logger.Infof("Started %d workers (simulation mode)", config.WorkerCount)
 
-	// Wait for shutdown
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
-	
-	sig := <-sigChan
-	logger.Infof("Received signal: %v", sig)
+	<-sigChan
 
 	logger.Info("Shutting down gracefully...")
 	cancel()
@@ -152,19 +121,14 @@ func simulateWorker(ctx context.Context, id int, config *Config) {
 			logger.Infof("Worker %d stopping", id)
 			return
 		case <-ticker.C:
-			// Simulate processing a notification
-			startTime := time.Now()
-			
-			// Randomly pick a destination
 			destinations := []string{"discord", "slack", "webhook"}
 			dest := destinations[rand.Intn(len(destinations))]
 			
-			// Simulate sending with some random success/failure
-			success := rand.Float64() > 0.05 // 95% success rate
+			success := rand.Float64() > 0.05
 			
 			if success {
 				notificationsSent.WithLabelValues(dest, "success").Inc()
-				latency := 0.1 + rand.Float64()*2 // 0.1-2.1 seconds
+				latency := 0.1 + rand.Float64()*2
 				notificationLatency.WithLabelValues(dest).Observe(latency)
 				
 				logger.WithFields(logrus.Fields{
@@ -173,7 +137,6 @@ func simulateWorker(ctx context.Context, id int, config *Config) {
 					"latency":     fmt.Sprintf("%.2fs", latency),
 				}).Info("Notification sent (simulated)")
 			} else {
-				// Simulate failure and retry
 				attempts := rand.Intn(config.MaxRetryAttempts) + 1
 				for attempt := 0; attempt < attempts; attempt++ {
 					retryAttempts.WithLabelValues(fmt.Sprintf("%d", attempt)).Inc()
@@ -184,37 +147,22 @@ func simulateWorker(ctx context.Context, id int, config *Config) {
 					notificationsSent.WithLabelValues(dest, "failed").Inc()
 					dlqMessages.Inc()
 					logger.WithFields(logrus.Fields{
-						"worker":      id,
+						"worker": id,
 						"destination": dest,
-						"attempts":    attempts,
 					}).Warn("Notification failed after retries (simulated)")
-				} else {
-					notificationsSent.WithLabelValues(dest, "success").Inc()
-					logger.WithFields(logrus.Fields{
-						"worker":      id,
-						"destination": dest,
-						"attempts":    attempts,
-					}).Info("Notification sent after retry (simulated)")
 				}
 			}
-			
-			workerProcessingDuration.Observe(time.Since(startTime).Seconds())
 		}
 	}
 }
 
 func calculateBackoff(attempt int, config *Config) time.Duration {
-	backoffSeconds := math.Pow(float64(config.RetryBackoffMultiplier), float64(attempt))
-	
-	if backoffSeconds > float64(config.RetryMaxBackoffSeconds) {
-		backoffSeconds = float64(config.RetryMaxBackoffSeconds)
+	backoff := math.Pow(float64(config.RetryBackoffMultiplier), float64(attempt))
+	if backoff > float64(config.RetryMaxBackoffSeconds) {
+		backoff = float64(config.RetryMaxBackoffSeconds)
 	}
-
-	// Add jitter (±20%)
-	jitter := backoffSeconds * 0.2 * (rand.Float64()*2 - 1)
-	backoff := time.Duration(backoffSeconds+jitter) * time.Second
-
-	return backoff
+	jitter := backoff * 0.2 * (rand.Float64()*2 - 1)
+	return time.Duration(backoff+jitter) * time.Second
 }
 
 func startMetricsServer(port string) {
@@ -223,15 +171,9 @@ func startMetricsServer(port string) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("OK"))
 	})
-	http.HandleFunc("/ready", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("READY"))
-	})
 
 	addr := fmt.Sprintf(":%s", port)
-	logger.Infof("Starting metrics server on %s", addr)
-	logger.Infof("Metrics: http://localhost:%s/metrics", port)
-	logger.Infof("Health: http://localhost:%s/health", port)
+	logger.Infof("Metrics server: http://localhost:%s/metrics", port)
 	
 	if err := http.ListenAndServe(addr, nil); err != nil {
 		logger.Fatalf("Metrics server failed: %v", err)

@@ -1,8 +1,9 @@
-module github.com/hashbury1/on-chain-transaction-monitor
+module on-chain-transaction-monitor
 
 go 1.23.0
 
 require (
+	github.com/lib/pq v1.11.2
 	github.com/prometheus/client_golang v1.23.2
 	github.com/sirupsen/logrus v1.9.4
 )
