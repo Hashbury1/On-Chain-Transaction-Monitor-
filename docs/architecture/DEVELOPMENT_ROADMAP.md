@@ -4,7 +4,7 @@
 
 **Timeline:** 4-6 weeks for MVP, 8-12 weeks for production-ready system
 **Team Size:** 1-3 developers
-**Complexity:** Intermediate to Advanced
+**Complexity:** Intermediate to Advanced project
 
 ---
 
@@ -42,7 +42,7 @@
 - Project documentation
 
 **Interview Talking Point:**
-"I started by setting up a proper development environment with Docker Compose for local dependencies, implemented pre-commit hooks for code quality, and established a CI pipeline from day one to catch issues early."
+"I started by setting up a proper dev env with Docker Compose for local dependencies, implemented pre-commit hooks for code quality, and established a CI pipeline from day one to catch issues early."
 
 ---
 
